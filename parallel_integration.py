@@ -69,7 +69,7 @@ class ParallelDecoysGenerator:
             'smi_bundle_dir': smi_bundle_dir,
             'prop_prefix': prop_prefix,
             'smi_prefix': smi_prefix,
-            'config_file': config_file
+            'config_file': config_file  # Use the actual config file, not temp
         }
         
         self.sampling_config = {

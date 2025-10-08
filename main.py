@@ -518,8 +518,9 @@ def main():
             apply_similarity_filter=not args.no_similarity_filter
         )
         
-        # Clean up temporary config file
-        os.remove(temp_config_file)
+        # Don't clean up temporary config file yet - parallel generator needs it
+        # It will be cleaned up at the end of processing
+        temp_config_to_cleanup = temp_config_file
         
         if args.verbose:
             init_time = time.time() - init_start
@@ -619,7 +620,21 @@ def main():
         
         print("Done!")
         
+        # Clean up temporary config file
+        try:
+            if 'temp_config_to_cleanup' in locals():
+                os.remove(temp_config_to_cleanup)
+        except:
+            pass  # Ignore cleanup errors
+        
     except Exception as e:
+        # Clean up temporary config file on error too
+        try:
+            if 'temp_config_to_cleanup' in locals():
+                os.remove(temp_config_to_cleanup)
+        except:
+            pass
+            
         print(f"Error: {e}")
         if args.verbose:
             import traceback
