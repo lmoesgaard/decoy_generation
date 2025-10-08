@@ -81,21 +81,21 @@ def create_spider_plot(ax, target_properties: np.ndarray, decoy_properties: np.n
     property_stats = []
     for i in range(n_props):
         if decoy_properties.shape[0] > 0:
-            decoy_col = decoy_properties[:, i]
+            decoy_col = decoy_properties[:, i].astype(float)  # Ensure float type
             stats = {
-                'target': target_properties[i],
-                'decoy_mean': decoy_col.mean(),
-                'decoy_std': decoy_col.std(),
-                'decoy_min': decoy_col.min(),
-                'decoy_max': decoy_col.max()
+                'target': float(target_properties[i]),
+                'decoy_mean': float(decoy_col.mean()),
+                'decoy_std': float(decoy_col.std()),
+                'decoy_min': float(decoy_col.min()),
+                'decoy_max': float(decoy_col.max())
             }
         else:
             stats = {
-                'target': target_properties[i],
-                'decoy_mean': target_properties[i],
+                'target': float(target_properties[i]),
+                'decoy_mean': float(target_properties[i]),
                 'decoy_std': 0.0,
-                'decoy_min': target_properties[i],
-                'decoy_max': target_properties[i]
+                'decoy_min': float(target_properties[i]),
+                'decoy_max': float(target_properties[i])
             }
         property_stats.append(stats)
     
@@ -127,6 +127,11 @@ def create_spider_plot(ax, target_properties: np.ndarray, decoy_properties: np.n
     
     # Normalize values to 0-1 for plotting (but keep original values for labels)
     def normalize_value(value, scale_min, scale_max):
+        # Ensure all values are floats to avoid type issues
+        value = float(value)
+        scale_min = float(scale_min)
+        scale_max = float(scale_max)
+        
         if scale_max - scale_min > 1e-10:
             return (value - scale_min) / (scale_max - scale_min)
         else:
@@ -209,7 +214,7 @@ def generate_property_report(results: Dict[str, Molecule], output_dir: str = "re
     # Get property names from the first molecule with decoys
     first_molecule = next(iter(molecules_with_decoys.values()))
     property_columns = [col for col in first_molecule.decoys.columns 
-                       if col not in ['smi', 'name', 'score']]
+                       if col not in ['smi', 'smiles', 'name', 'score', 'target']]
     
     if not property_columns:
         print("No property columns found in decoy data. Skipping property report generation.")
@@ -225,10 +230,10 @@ def generate_property_report(results: Dict[str, Molecule], output_dir: str = "re
                 ax1 = plt.subplot(121, projection='polar')
                 
                 # Extract decoy properties
-                decoy_data = molecule.decoys[property_columns].values
+                decoy_data = molecule.decoys[property_columns].values.astype(float)
                 
                 # Get target properties (only the active ones)
-                target_properties = molecule.properties
+                target_properties = np.array(molecule.properties, dtype=float)
                 
                 # Create spider plot
                 create_spider_plot(ax1, target_properties, decoy_data, 
