@@ -10,6 +10,8 @@ import sys
 import argparse
 import json
 import time
+import multiprocessing as mp
+import psutil  # For memory monitoring
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
@@ -323,6 +325,79 @@ def generate_property_report(results: Dict[str, Molecule], output_dir: str = "re
         print(f"Error generating property report: {e}")
 
 
+def calculate_safe_process_count(requested_processes: int, verbose: bool = False) -> int:
+    """
+    Calculate a safe number of processes based on system resources.
+    
+    Args:
+        requested_processes: User-requested number of processes
+        verbose: Whether to print diagnostic information
+        
+    Returns:
+        int: Safe number of processes to use
+    """
+    # Get system information
+    cpu_count = mp.cpu_count()
+    memory_gb = psutil.virtual_memory().total / (1024**3)
+    available_memory_gb = psutil.virtual_memory().available / (1024**3)
+    
+    # Conservative limits for molecular processing
+    max_processes_cpu = max(1, cpu_count - 1)  # Leave one CPU free
+    max_processes_memory = max(1, int(available_memory_gb / 2))  # Assume 2GB per process minimum
+    
+    # Check if we're on a cluster (common indicators)
+    is_cluster = any([
+        os.environ.get('SLURM_JOB_ID'),
+        os.environ.get('PBS_JOBID'), 
+        os.environ.get('LSB_JOBID'),
+        os.environ.get('SGE_JOB_ID')
+    ])
+    
+    if is_cluster:
+        # On clusters, be more conservative
+        max_processes_cluster = max(1, min(cpu_count // 2, 16))  # Limit to 16 processes max
+        safe_processes = min(requested_processes, max_processes_cpu, max_processes_memory, max_processes_cluster)
+        
+        if verbose:
+            print(f"Cluster environment detected")
+            print(f"  Available CPUs: {cpu_count}")
+            print(f"  Available memory: {available_memory_gb:.1f} GB")
+            print(f"  Requested processes: {requested_processes}")
+            print(f"  CPU limit: {max_processes_cpu}")
+            print(f"  Memory limit: {max_processes_memory}")
+            print(f"  Cluster limit: {max_processes_cluster}")
+            print(f"  Using: {safe_processes} processes")
+    else:
+        # On local machines, be less restrictive
+        safe_processes = min(requested_processes, max_processes_cpu, max_processes_memory)
+        
+        if verbose:
+            print(f"Local environment detected")
+            print(f"  Available CPUs: {cpu_count}")
+            print(f"  Available memory: {available_memory_gb:.1f} GB")
+            print(f"  Requested processes: {requested_processes}")
+            print(f"  Using: {safe_processes} processes")
+    
+    if safe_processes < requested_processes:
+        print(f"Warning: Reduced process count from {requested_processes} to {safe_processes} for safety")
+        if available_memory_gb < 8:
+            print("Warning: Low memory detected. Consider reducing batch size or using fewer processes.")
+    
+    return safe_processes
+
+
+def monitor_memory_usage(threshold_gb: float = 0.5) -> None:
+    """
+    Monitor memory usage and warn if getting low.
+    
+    Args:
+        threshold_gb: Warn if available memory falls below this threshold
+    """
+    available_gb = psutil.virtual_memory().available / (1024**3)
+    if available_gb < threshold_gb:
+        print(f"Warning: Low memory! Only {available_gb:.1f} GB available")
+
+
 def validate_paths(args: argparse.Namespace) -> bool:
     """
     Validate that all required paths exist.
@@ -500,6 +575,12 @@ def main():
         temp_config_file = "temp_config.json"
         config.save_to_file(temp_config_file)
         
+        # Calculate safe process count
+        safe_n_proc = calculate_safe_process_count(args.n_proc, args.verbose)
+        
+        # Monitor memory before starting
+        monitor_memory_usage()
+        
         # Initialize generator
         if args.verbose:
             setup_time = time.time() - setup_start
@@ -517,7 +598,7 @@ def main():
             config_file=temp_config_file,
             ligand_smi_file=args.ligands,
             oversample=args.oversample,
-            n_proc=args.n_proc,
+            n_proc=safe_n_proc,  # Use safe process count
             batch_size=args.batch_size,
             verbose=args.verbose,
             apply_similarity_filter=not args.no_similarity_filter

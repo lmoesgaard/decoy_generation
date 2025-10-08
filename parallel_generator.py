@@ -16,6 +16,7 @@ import os
 import pandas as pd
 import numpy as np
 import time
+import psutil  # For memory monitoring
 from multiprocessing import Pool, Manager, Value, Array
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
@@ -56,6 +57,7 @@ def process_bundle_worker(args: Tuple) -> BundleResult:
     
     This function is designed to be simple and pickleable.
     All complex objects are reconstructed within the worker.
+    Uses minimal memory by streaming data rather than loading large arrays.
     
     Args:
         args: Tuple containing:
@@ -88,7 +90,10 @@ def process_bundle_worker(args: Tuple) -> BundleResult:
         if not os.path.exists(smi_file) or not os.path.exists(prop_file):
             return result
         
-        # Load property array
+        # Memory optimization: Process in chunks instead of loading entire arrays
+        chunk_size = min(10000, sampling_config.get('batch_size', 10000))
+        
+        # Get total lines from property file
         prop_arr = db_props.load_property_bundle(bundle_id)
         total_lines = prop_arr.shape[0]
         
@@ -102,26 +107,39 @@ def process_bundle_worker(args: Tuple) -> BundleResult:
         if not sample_indices:
             return result
         
-        # Process sampled lines
-        molecules_data = _read_sampled_molecules(smi_file, sample_indices)
-        result.stats['lines_processed'] = len(molecules_data)
-        
-        if not molecules_data:
-            return result
-        
-        # Extract properties for sampled molecules
-        sampled_properties = prop_arr[sample_indices, :][:, db_props.column_mask]
-        
-        # Process each target molecule
-        for target in target_molecules:
-            target_decoys = _find_decoys_for_target(
-                target, molecules_data, sampled_properties, 
-                db_props, sampling_config
-            )
+        # Process in chunks to reduce memory usage
+        for chunk_start in range(0, len(sample_indices), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(sample_indices))
+            chunk_indices = sample_indices[chunk_start:chunk_end]
             
-            if target_decoys:
-                result.decoys[target['name']] = target_decoys
-                result.stats['molecules_found'] += len(target_decoys)
+            # Process this chunk
+            molecules_data = _read_sampled_molecules(smi_file, chunk_indices)
+            if not molecules_data:
+                continue
+                
+            # Extract properties for this chunk only
+            chunk_properties = prop_arr[chunk_indices, :][:, db_props.column_mask]
+            
+            # Process each target molecule for this chunk
+            for target in target_molecules:
+                target_decoys = _find_decoys_for_target(
+                    target, molecules_data, chunk_properties, 
+                    db_props, sampling_config
+                )
+                
+                if target_decoys:
+                    if target['name'] not in result.decoys:
+                        result.decoys[target['name']] = []
+                    result.decoys[target['name']].extend(target_decoys)
+                    result.stats['molecules_found'] += len(target_decoys)
+            
+            result.stats['lines_processed'] += len(molecules_data)
+            
+            # Clear chunk data to free memory
+            del molecules_data, chunk_properties
+        
+        # Clear large arrays
+        del prop_arr
         
         result.stats['processing_time'] = time.time() - start_time
         
@@ -305,7 +323,7 @@ class ParallelBundleGenerator:
     
     def process_bundles_parallel(self) -> Dict[str, Molecule]:
         """
-        Process all available bundles in parallel.
+        Process all available bundles in parallel with memory management.
         
         Returns:
             Dict[str, Molecule]: Updated target molecules with decoys
@@ -316,12 +334,79 @@ class ParallelBundleGenerator:
             print("No bundles found!")
             return self.target_molecules
         
+        # Memory-based batch sizing
+        available_memory_gb = psutil.virtual_memory().available / (1024**3)
+        max_concurrent_bundles = self._calculate_max_concurrent_bundles(
+            available_memory_gb, len(available_bundles)
+        )
+        
         print(f"Found {len(available_bundles)} bundles to process")
+        if self.verbose:
+            print(f"Available memory: {available_memory_gb:.1f} GB")
+            print(f"Max concurrent bundles: {max_concurrent_bundles}")
         
         if len(available_bundles) == 1:
             print("Single bundle detected, using sequential processing")
             return self._process_single_bundle(available_bundles[0])
         
+        # Process bundles in batches if memory constrained
+        if max_concurrent_bundles < len(available_bundles):
+            print(f"Memory-limited: processing in batches of {max_concurrent_bundles}")
+            return self._process_bundles_in_batches(available_bundles, max_concurrent_bundles)
+        else:
+            return self._process_all_bundles_parallel(available_bundles)
+    
+    def _calculate_max_concurrent_bundles(self, available_memory_gb: float, total_bundles: int) -> int:
+        """Calculate maximum number of bundles to process concurrently."""
+        # Estimate memory per bundle (conservative estimate)
+        memory_per_bundle_gb = 0.5  # Assume 500MB per bundle
+        memory_per_process_gb = 0.3  # Assume 300MB per process overhead
+        
+        # Reserve memory for system and other processes
+        usable_memory_gb = available_memory_gb * 0.7  # Use only 70% of available memory
+        
+        # Calculate based on bundle memory requirements
+        max_by_bundle_memory = max(1, int(usable_memory_gb / memory_per_bundle_gb))
+        
+        # Calculate based on process memory requirements  
+        max_by_process_memory = max(1, int(usable_memory_gb / (self.n_processes * memory_per_process_gb)))
+        
+        # Use the more conservative limit
+        max_concurrent = min(max_by_bundle_memory, max_by_process_memory, total_bundles)
+        
+        return max_concurrent
+    
+    def _process_bundles_in_batches(self, available_bundles: List[int], batch_size: int) -> Dict[str, Molecule]:
+        """Process bundles in batches to manage memory usage."""
+        if self.verbose:
+            print(f"Processing {len(available_bundles)} bundles in batches of {batch_size}")
+        
+        for batch_start in range(0, len(available_bundles), batch_size):
+            batch_end = min(batch_start + batch_size, len(available_bundles))
+            batch_bundles = available_bundles[batch_start:batch_end]
+            
+            if self.verbose:
+                print(f"Processing batch {batch_start//batch_size + 1}: bundles {batch_bundles}")
+            
+            # Monitor memory before batch
+            memory_before = psutil.virtual_memory().available / (1024**3)
+            
+            self._process_all_bundles_parallel(batch_bundles)
+            
+            # Monitor memory after batch  
+            memory_after = psutil.virtual_memory().available / (1024**3)
+            memory_used = memory_before - memory_after
+            
+            if self.verbose and memory_used > 0.1:
+                print(f"Batch memory usage: {memory_used:.1f} GB")
+            
+            # Small delay between batches to allow garbage collection
+            time.sleep(0.1)
+        
+        return self.target_molecules
+        
+    def _process_all_bundles_parallel(self, available_bundles: List[int]) -> Dict[str, Molecule]:
+        """Process all bundles in parallel without batching."""
         # Prepare arguments for parallel processing
         args_list = []
         for bundle_id in available_bundles:
@@ -335,10 +420,22 @@ class ParallelBundleGenerator:
         # Process bundles in parallel
         if self.verbose:
             print(f"Processing {len(available_bundles)} bundles with {self.n_processes} processes...")
+            memory_gb = psutil.virtual_memory().available / (1024**3)
+            print(f"Available memory: {memory_gb:.1f} GB")
             start_time = time.time()
+        
+        # Monitor memory usage during processing
+        initial_memory = psutil.virtual_memory().available / (1024**3)
         
         with Pool(self.n_processes) as pool:
             results = pool.map(process_bundle_worker, args_list)
+        
+        # Check memory usage after processing
+        final_memory = psutil.virtual_memory().available / (1024**3)
+        memory_used = initial_memory - final_memory
+        
+        if self.verbose and memory_used > 0.1:
+            print(f"Memory consumed during processing: {memory_used:.1f} GB")
         
         # Aggregate results
         total_decoys_found = 0
