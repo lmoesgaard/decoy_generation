@@ -455,9 +455,29 @@ class DecoysGenerator:
         # Step 3: Use seeking to read only the selected lines
         df_batch = []
         selected_indices = []
+        lines_processed = 0
+        
+        # Progress reporting
+        total_samples = len(sample_line_numbers)
+        next_progress_report = max(1, total_samples // 20)  # Report every 5%
+        
+        if self.verbose:
+            seeking_start = time.time()
+            print(f"  Starting to seek and process {total_samples:,} target lines...")
+        else:
+            print(f"  Processing {total_samples:,} sampled lines...")
         
         with open(smi_file, 'r') as f:
-            for sample_line_num in sample_line_numbers:
+            for i, sample_line_num in enumerate(sample_line_numbers):
+                # Progress reporting
+                if i > 0 and (i % next_progress_report == 0 or i == total_samples - 1):
+                    progress_pct = (i + 1) * 100.0 / total_samples
+                    if self.verbose:
+                        print(f"    Progress: {progress_pct:.1f}% ({i+1:,}/{total_samples:,} lines sampled)")
+                    else:
+                        print(f"    Seeking progress: {progress_pct:.0f}%")
+                
+                # Calculate approximate byte position for this line
                 # Calculate approximate byte position for this line
                 if sample_line_num < len(line_positions) * sample_interval:
                     # We have a mapped position
@@ -507,16 +527,27 @@ class DecoysGenerator:
                 # Process batch when it reaches batch_size
                 if len(df_batch) >= self.batch_size:
                     if df_batch:
+                        if self.verbose:
+                            print(f"      Processing batch of {len(df_batch)} molecules...")
                         self._process_batch(df_batch, prop_arr, selected_indices)
+                        lines_processed += len(df_batch)
+                        if self.verbose:
+                            print(f"      Batch processed. Total molecules processed: {lines_processed}")
                     df_batch = []
                     selected_indices = []
         
         # Process any remaining batch
         if df_batch:
+            if self.verbose:
+                print(f"    Processing final batch of {len(df_batch)} molecules...")
             self._process_batch(df_batch, prop_arr, selected_indices)
+            lines_processed += len(df_batch)
         
         if self.verbose:
             print(f"  Successfully sampled {len(sample_line_numbers):,} lines using seeking")
+            print(f"  Total valid molecules processed: {lines_processed}")
+        else:
+            print(f"  Seeking completed: {lines_processed} molecules processed")
     
     def _process_batch(self, df_batch: list, prop_arr: np.ndarray, 
                       selected_indices: list) -> None:
@@ -531,6 +562,9 @@ class DecoysGenerator:
         if not df_batch or not selected_indices:
             return  # Nothing to process
         
+        if self.verbose:
+            batch_start = time.time()
+        
         # Create DataFrame from batch
         df_batch_df = pd.DataFrame(df_batch, columns=["smi", "name"])
         
@@ -544,12 +578,23 @@ class DecoysGenerator:
             for name, molecule in self.actives.items()
         ]
         
+        if self.verbose:
+            print(f"        Starting parallel processing of {len(df_batch)} molecules for {len(self.actives)} targets...")
+        
         # Process in parallel
         with Pool(self.n_proc) as pool:
             results = pool.map(process_molecule_batch, args_list)
         
         # Update actives with results
         self.actives = {name: molecule for name, molecule in results}
+        
+        if self.verbose:
+            batch_time = time.time() - batch_start
+            print(f"        Batch processing completed in {batch_time:.2f}s")
+            
+            # Show current decoy counts
+            for name, molecule in self.actives.items():
+                print(f"        {name}: {molecule.num_decoys} decoys found")
     
     def _apply_similarity_filtering(self) -> None:
         """
