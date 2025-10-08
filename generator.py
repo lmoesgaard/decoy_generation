@@ -397,6 +397,12 @@ class DecoysGenerator:
         if self.verbose:
             print(f"  Using ultra-fast seeking method for fraction {database_fraction:.4f}")
         
+        # Get exact number of lines from property array shape
+        total_lines = prop_arr.shape[0]
+        
+        if self.verbose:
+            print(f"  Exact line count from property array: {total_lines:,}")
+        
         # Step 1: Build a map of line positions by sampling the file
         line_positions = []
         
@@ -405,8 +411,9 @@ class DecoysGenerator:
             pos = 0
             line_count = 0
             sample_interval = 1000
+            max_mapping_lines = min(total_lines, 10_000_000)  # Don't map more than 10M lines
             
-            while True:
+            while line_count < max_mapping_lines:
                 if line_count % sample_interval == 0:
                     line_positions.append(pos)
                 
@@ -416,25 +423,12 @@ class DecoysGenerator:
                     
                 pos = f.tell()
                 line_count += 1
-                
-                # For very large files, we don't need to map every position
-                # Stop mapping after we have enough reference points
-                if len(line_positions) > 10000:  # 10M lines mapped
-                    # Estimate remaining file
-                    f.seek(0, 2)  # Seek to end
-                    total_file_size = f.tell()
-                    avg_line_size = pos / line_count if line_count > 0 else 50
-                    estimated_total_lines = int(total_file_size / avg_line_size)
-                    break
-            else:
-                # File was fully read
-                estimated_total_lines = line_count
         
         if self.verbose:
-            print(f"  Estimated {estimated_total_lines:,} total lines, mapped {len(line_positions):,} positions")
+            print(f"  Mapped {len(line_positions):,} position markers for {total_lines:,} total lines")
         
         # Step 2: Calculate which lines to sample
-        target_samples = int(estimated_total_lines * database_fraction)
+        target_samples = int(total_lines * database_fraction)
         target_samples = min(target_samples, self.batch_size * 100)  # Reasonable upper limit
         
         if target_samples == 0:
@@ -447,14 +441,14 @@ class DecoysGenerator:
         
         # Generate random line numbers to sample efficiently
         # For sparse sampling on huge files, use geometric distribution for speed
-        if estimated_total_lines > 1000000 and target_samples < estimated_total_lines // 100:
+        if total_lines > 1000000 and target_samples < total_lines // 100:
             if self.verbose:
                 print(f"    Using geometric sampling for sparse coverage...")
             
             # Ultra-fast geometric sampling - no duplicates by design
             sample_line_numbers = []
             current_pos = 0
-            avg_gap = estimated_total_lines / target_samples
+            avg_gap = total_lines / target_samples
             
             # Generate positions using exponential gaps
             for i in range(target_samples):
@@ -463,7 +457,7 @@ class DecoysGenerator:
                 gap = max(1, int(np.random.exponential(avg_gap - gap_variation) + gap_variation))
                 current_pos += gap
                 
-                if current_pos >= estimated_total_lines:
+                if current_pos >= total_lines:
                     break
                     
                 sample_line_numbers.append(current_pos)
@@ -476,7 +470,7 @@ class DecoysGenerator:
         else:
             # For smaller ranges or dense sampling, use numpy choice
             sample_line_numbers = np.sort(np.random.choice(
-                estimated_total_lines, 
+                total_lines, 
                 size=target_samples, 
                 replace=False
             ))
