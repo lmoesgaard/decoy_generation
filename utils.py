@@ -9,9 +9,16 @@ property definitions.
 from rdkit.Chem import Descriptors, Crippen, rdMolDescriptors, Lipinski
 from rdkit import DataStructs, Chem
 from rdkit.Chem import rdFingerprintGenerator
-from openbabel import openbabel as ob
 from typing import Tuple, List, Callable
 import numpy as np
+
+# Optional OpenBabel import
+try:
+    from openbabel import openbabel as ob
+    HAS_OPENBABEL = True
+except ImportError:
+    HAS_OPENBABEL = False
+    ob = None
 
 
 def get_charge(smi: str) -> List[int]:
@@ -30,7 +37,14 @@ def get_charge(smi: str) -> List[int]:
         
     Raises:
         ValueError: If the SMILES string is invalid
+        ImportError: If OpenBabel is not installed
     """
+    if not HAS_OPENBABEL:
+        raise ImportError(
+            "OpenBabel is required for charge detection. "
+            "Install with: pip install openbabel-wheel"
+        )
+    
     conv = ob.OBConversion()
     conv.SetInAndOutFormats("smi", "smi")
 
@@ -97,7 +111,14 @@ def predict_charge(smi: str, pH: float = 7.4) -> List[int]:
         
     Raises:
         ValueError: If the SMILES string is invalid
+        ImportError: If OpenBabel is not installed
     """
+    if not HAS_OPENBABEL:
+        raise ImportError(
+            "OpenBabel is required for pH-dependent charge prediction. "
+            "Install with: pip install openbabel-wheel"
+        )
+    
     conv = ob.OBConversion()
     conv.SetInAndOutFormats("smi", "smi")
 

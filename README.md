@@ -4,36 +4,72 @@ A clean, modular Python package for generating molecular decoys based on propert
 
 ## Overview
 
-This package provides a complete pipeline for generating molecular decoys for drug discovery applications. 
+This package provides a complete pipeline for generating molecular decoys for drug discovery applications. It features property-based filtering, structural similarity analysis, enhanced charge detection, and comprehensive PDF reporting.
 
-## Project Structure
+## Features
 
-```
-decoy_generation/
-├── __init__.py          # Package initialization
-├── config.py            # Configuration management
-├── database.py          # Database handling and property calculations
-├── generator.py         # Main decoy generation logic
-├── models.py            # Data structures and models
-├── utils.py             # Utility functions for molecular properties
-├── main.py              # Command-line interface
-├── sample_props.py      # Property sampling utility
-└── README.md            # This file
-```
+- **Modular Design**: Clean separation of concerns with dedicated modules for configuration, database handling, and generation logic
+- **Property-Based Filtering**: Filter molecules by molecular weight, LogP, hydrogen bonding, TPSA, and more
+- **Structural Similarity**: Tanimoto coefficient-based filtering for chemical diversity
+- **Enhanced Charge Detection**: Detects cations, anions, zwitterions, and neutral molecules with pH-dependent protonation
+- **PDF Reports**: Automatic generation of spider plots and data tables showing property distributions
+- **Configurable Pipeline**: JSON-based configuration for easy customization
+- **Performance Optimized**: Multi-processing support and memory-efficient batch processing
 
 ## Installation
 
-Ensure you have the required dependencies:
-
+### Option 1: Install from PyPI (Coming Soon)
 ```bash
-pip install rdkit pandas numpy openbabel matplotlib
+pip install decoy-generation
 ```
 
-**Note**: `matplotlib` is optional but recommended for generating property comparison reports.
+### Option 2: Install from Source
+```bash
+# Clone the repository
+git clone https://github.com/lmoesgaard/decoy_generation.git
+cd decoy_generation
+
+# Install in development mode (recommended)
+pip install -e .
+
+# Or install normally
+pip install .
+```
+
+### Option 3: Install Dependencies Only
+```bash
+# Install dependencies from requirements.txt
+pip install -r requirements.txt
+```
+
+### Dependencies
+
+The package automatically installs the following dependencies:
+- **rdkit>=2023.3.1**: Molecular informatics toolkit
+- **pandas>=1.5.0**: Data manipulation and analysis
+- **numpy>=1.21.0**: Numerical computing
+- **matplotlib>=3.5.0**: Plotting and visualization
+- **openbabel>=3.1.0**: Chemical file format conversion
+- **scipy>=1.9.0**: Scientific computing
 
 ## Usage
 
-### Command Line Interface
+After installation, you can use the package in several ways:
+
+### Command Line Interface (Installed Package)
+
+```bash
+# Generate decoys
+decoy-generation --ligands ligands.smi --config config.json --output-dir results
+
+# Sample properties 
+sample-props --bundle-dir /path/to/bundles --output sampled_std.npy
+
+# Get help
+decoy-generation --help
+```
+
+### Direct Script Execution
 
 The main script provides a comprehensive command-line interface:
 
