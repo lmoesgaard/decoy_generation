@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from config import DecoyGenerationConfig, load_or_create_config
-from generator import DecoysGenerator
+#from generator import DecoysGenerator
+from parallel_integration import ParallelDecoysGenerator as DecoysGenerator
 from models import Molecule
 
 
