@@ -442,12 +442,44 @@ class DecoysGenerator:
                 print(f"  No samples needed for fraction {database_fraction}")
             return
         
-        # Generate random line numbers to sample
-        sample_line_numbers = np.sort(np.random.choice(
-            estimated_total_lines, 
-            size=target_samples, 
-            replace=False
-        ))
+        if self.verbose:
+            print(f"  Generating {target_samples:,} random sample positions...")
+        
+        # Generate random line numbers to sample efficiently
+        # For sparse sampling on huge files, use geometric distribution for speed
+        if estimated_total_lines > 1000000 and target_samples < estimated_total_lines // 100:
+            if self.verbose:
+                print(f"    Using geometric sampling for sparse coverage...")
+            
+            # Ultra-fast geometric sampling - no duplicates by design
+            sample_line_numbers = []
+            current_pos = 0
+            avg_gap = estimated_total_lines / target_samples
+            
+            # Generate positions using exponential gaps
+            for i in range(target_samples):
+                # Add some randomness to the gap while maintaining coverage
+                gap_variation = avg_gap * 0.5  # 50% variation around average
+                gap = max(1, int(np.random.exponential(avg_gap - gap_variation) + gap_variation))
+                current_pos += gap
+                
+                if current_pos >= estimated_total_lines:
+                    break
+                    
+                sample_line_numbers.append(current_pos)
+                
+                # Quick progress for very large samples
+                if self.verbose and i > 0 and i % 5000 == 0:
+                    print(f"      Generated {i:,}/{target_samples:,} positions")
+            
+            sample_line_numbers = np.array(sample_line_numbers)
+        else:
+            # For smaller ranges or dense sampling, use numpy choice
+            sample_line_numbers = np.sort(np.random.choice(
+                estimated_total_lines, 
+                size=target_samples, 
+                replace=False
+            ))
         
         if self.verbose:
             print(f"  Will sample {len(sample_line_numbers):,} lines")
