@@ -1,0 +1,12 @@
+python main.py \
+    --enamine-std /Users/moesgaard/Projects/xreal/scripts/sampled_std.npy \
+    --prop-bundle-dir  /Users/moesgaard/Projects/xreal/decoys \
+    --smi-bundle-dir /Users/moesgaard/Projects/xreal/decoys \
+    --ligands /Users/moesgaard/Projects/xreal/scripts/test.smi \
+    --config examples/default_config.json \
+    --output-dir ../output \
+    --oversample 10 \
+    --batch-size 500000 \
+    --database-fraction 1.0\
+    --n-proc 8 \
+    --verbose

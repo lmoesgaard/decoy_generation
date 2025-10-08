@@ -1,0 +1,15 @@
+{
+    "Protonate": false,
+    "MWt": false,
+    "NumHeavyAtoms": true,
+    "logP": true,
+    "NumHAcceptors": true,
+    "NumHDonors": true,
+    "CalcTPSA": false,
+    "NumValenceElectrons": false,
+    "NumRotatableBonds": false,
+    "Charge": true,
+    "Max_tc": 0.35,
+    "Max_decoys_per_ligand": 50,
+    "Threshold": 0.2
+}
