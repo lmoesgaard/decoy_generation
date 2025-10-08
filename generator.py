@@ -236,40 +236,80 @@ class DecoysGenerator:
         prop_arr = self.db_props.load_property_bundle(bundle_index)
         
         # Process SMILES file in batches
+        database_fraction = self.config.get('Database_fraction', 1.0)
+        
         with open(smi_file, 'r') as f:
             df_batch = []
-            selected_indices = []  # Track which indices were selected
+            selected_indices = []
             total_processed = 0
             
-            for line_count, line in enumerate(f):
-                # Check if we should include this molecule based on database fraction
-                if np.random.random() > self.config.get('Database_fraction', 1.0):
-                    total_processed += 1
-                    continue  # Skip this line based on sampling fraction
-                
-                # Parse SMILES line
-                parts = line.strip().split()
-                if len(parts) >= 2:
-                    df_batch.append(parts[:2])  # Take only SMILES and name
-                    selected_indices.append(total_processed)
-                elif len(parts) == 1:
-                    df_batch.append([parts[0], f"mol_{line_count}"])  # Generate name if missing
-                    selected_indices.append(total_processed)
-                else:
-                    total_processed += 1
-                    continue  # Skip invalid lines
-                
-                total_processed += 1
-                
-                # Process batch when it reaches batch_size or end of file
-                if (len(df_batch) >= self.batch_size or 
-                    total_processed >= prop_arr.shape[0]):
+            if database_fraction >= 1.0:
+                # Fast path: use all lines
+                for line_count, line in enumerate(f):
+                    # Parse SMILES line
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        df_batch.append(parts[:2])
+                        selected_indices.append(total_processed)
+                    elif len(parts) == 1:
+                        df_batch.append([parts[0], f"mol_{line_count}"])
+                        selected_indices.append(total_processed)
+                    else:
+                        total_processed += 1
+                        continue
                     
-                    if df_batch:  # Only process if we have data
-                        self._process_batch(df_batch, prop_arr, selected_indices)
+                    total_processed += 1
                     
-                    df_batch = []
-                    selected_indices = []
+                    # Process batch when it reaches batch_size
+                    if len(df_batch) >= self.batch_size:
+                        if df_batch:
+                            self._process_batch(df_batch, prop_arr, selected_indices)
+                        df_batch = []
+                        selected_indices = []
+            else:
+                # Optimized fractional sampling: pre-generate sampling pattern
+                # Use deterministic sampling for reproducibility
+                np.random.seed(hash(smi_file) % (2**32))  # Seed based on filename
+                
+                # Generate sampling decisions in chunks to avoid memory issues
+                chunk_size = 10000
+                sampling_chunk = np.random.random(chunk_size) <= database_fraction
+                chunk_idx = 0
+                
+                for line_count, line in enumerate(f):
+                    # Refresh sampling chunk if needed
+                    if chunk_idx >= chunk_size:
+                        sampling_chunk = np.random.random(chunk_size) <= database_fraction
+                        chunk_idx = 0
+                    
+                    # Skip line based on pre-generated sampling decision
+                    if not sampling_chunk[chunk_idx]:
+                        chunk_idx += 1
+                        total_processed += 1
+                        continue
+                    
+                    chunk_idx += 1
+                    
+                    # Parse SMILES line
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        df_batch.append(parts[:2])
+                        selected_indices.append(total_processed)
+                    elif len(parts) == 1:
+                        df_batch.append([parts[0], f"mol_{line_count}"])
+                        selected_indices.append(total_processed)
+                    else:
+                        total_processed += 1
+                        continue
+                    
+                    total_processed += 1
+                    
+                    # Process batch when it reaches batch_size
+                    if len(df_batch) >= self.batch_size:
+                        if df_batch:
+                            self._process_batch(df_batch, prop_arr, selected_indices)
+                        df_batch = []
+                        selected_indices = []
             
             # Process any remaining batch
             if df_batch:
