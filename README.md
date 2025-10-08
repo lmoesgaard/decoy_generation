@@ -38,11 +38,9 @@ cd decoy_generation
 # Install in development mode (recommended for contributors)
 pip install -e .
 
-# Or install with optional dependencies
-pip install -e .[openbabel,dev]
-```
-
-### Option 3: Manual Dependency Installation
+   # Or install with development dependencies
+   pip install -e .[dev]
+   ```### Option 3: Manual Dependency Installation
 ```bash
 # If you prefer to install dependencies separately
 pip install -r requirements.txt
@@ -51,19 +49,13 @@ python main.py --help  # Use directly without pip install
 
 ### Dependencies
 
-**Core dependencies** (automatically installed):
+**All dependencies are automatically installed**:
 - **rdkit**: Molecular informatics toolkit
 - **pandas**: Data manipulation and analysis  
 - **numpy**: Numerical computing
 - **matplotlib**: Plotting and visualization
 - **scipy**: Scientific computing
-
-**Optional dependencies**:
-- **openbabel-wheel**: Enhanced charge detection with pH-dependent protonation
-  ```bash
-  pip install openbabel-wheel
-  # or install with: pip install .[openbabel]
-  ```
+- **openbabel-wheel**: Chemical file format conversion and charge detection
 
 ### Verify Installation
 

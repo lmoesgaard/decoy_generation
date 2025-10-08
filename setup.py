@@ -31,12 +31,10 @@ setup(
         "pandas>=1.5.0",
         "numpy>=1.21.0",
         "matplotlib>=3.5.0",
+        "openbabel-wheel>=3.1.0",
         "scipy>=1.9.0",
     ],
     extras_require={
-        "openbabel": [
-            "openbabel-wheel>=3.1.0",
-        ],
         "dev": [
             "pytest>=7.0.0",
             "black>=22.0.0",
@@ -46,13 +44,6 @@ setup(
         "docs": [
             "sphinx>=5.0.0",
             "sphinx-rtd-theme>=1.0.0",
-        ],
-        "all": [
-            "openbabel-wheel>=3.1.0",
-            "pytest>=7.0.0",
-            "black>=22.0.0",
-            "flake8>=5.0.0",
-            "mypy>=0.900",
         ],
     },
     entry_points={
