@@ -9,13 +9,324 @@ import os
 import pandas as pd
 import numpy as np
 import time
-from multiprocessing import Pool
+from multiprocessing import Pool, Manager
 from numpy.lib.format import open_memmap
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, List
 
 from models import Molecule
 from database import DatabaseProperties
 from utils import get_charge, predict_charge, sim_filter
+
+
+def process_single_bundle(args: Tuple) -> Tuple[int, Dict[str, Molecule]]:
+    """
+    Process a single bundle in parallel. This function is standalone to avoid pickling issues.
+    
+    Args:
+        args: Tuple containing (bundle_index, db_props, actives, config, batch_size, verbose)
+        
+    Returns:
+        Tuple[int, Dict[str, Molecule]]: (bundle_index, updated_actives)
+    """
+    bundle_index, db_props, actives, config, batch_size, verbose = args
+    
+    if verbose:
+        print(f"  Worker: Starting bundle {bundle_index}")
+    
+    # Get bundle filenames
+    smi_file, prop_file = db_props.get_bundle_filenames(bundle_index)
+    
+    # Validate files exist
+    if not db_props.validate_bundle_files(bundle_index):
+        if verbose:
+            print(f"  Worker: Bundle {bundle_index} files not found")
+        return bundle_index, actives
+    
+    # Load property array as memory map
+    prop_arr = db_props.load_property_bundle(bundle_index)
+    
+    # Get exact number of lines from property array shape
+    total_lines = prop_arr.shape[0]
+    database_fraction = config.get('Database_fraction', 1.0)
+    
+    if verbose:
+        print(f"  Worker: Bundle {bundle_index} has {total_lines:,} lines, sampling {database_fraction:.4f}")
+    
+    # Use ultra-fast seeking for small fractions
+    if database_fraction <= 0.01:
+        actives = _process_bundle_with_seeking_parallel(
+            smi_file, prop_arr, total_lines, database_fraction, 
+            actives, db_props, config, batch_size, verbose, bundle_index
+        )
+    else:
+        actives = _process_bundle_standard_parallel(
+            smi_file, prop_arr, total_lines, database_fraction,
+            actives, db_props, config, batch_size, verbose, bundle_index
+        )
+    
+    if verbose:
+        print(f"  Worker: Completed bundle {bundle_index}")
+    
+    return bundle_index, actives
+
+
+def _process_bundle_with_seeking_parallel(smi_file: str, prop_arr: np.ndarray, total_lines: int,
+                                        database_fraction: float, actives: Dict[str, Molecule], 
+                                        db_props, config: dict, batch_size: int, verbose: bool,
+                                        bundle_index: int) -> Dict[str, Molecule]:
+    """Parallel version of seeking method."""
+    # Use deterministic sampling for reproducibility
+    np.random.seed(hash(smi_file) % (2**32))
+    
+    # Step 1: Build position map (simplified for parallel processing)
+    line_positions = []
+    sample_interval = 1000
+    max_mapping_lines = min(total_lines, 1_000_000)  # Reduced for parallel efficiency
+    
+    with open(smi_file, 'rb') as f:
+        pos = 0
+        line_count = 0
+        
+        while line_count < max_mapping_lines:
+            if line_count % sample_interval == 0:
+                line_positions.append(pos)
+            
+            line = f.readline()
+            if not line:
+                break
+                
+            pos = f.tell()
+            line_count += 1
+    
+    # Step 2: Generate sample positions
+    target_samples = int(total_lines * database_fraction)
+    target_samples = min(target_samples, batch_size * 10)  # Limit for parallel efficiency
+    
+    if target_samples == 0:
+        return actives
+    
+    # Fast geometric sampling
+    sample_line_numbers = []
+    current_pos = 0
+    avg_gap = total_lines / target_samples
+    
+    for i in range(target_samples):
+        gap_variation = avg_gap * 0.5
+        gap = max(1, int(np.random.exponential(avg_gap - gap_variation) + gap_variation))
+        current_pos += gap
+        
+        if current_pos >= total_lines:
+            break
+            
+        sample_line_numbers.append(current_pos)
+    
+    # Step 3: Process samples
+    return _process_samples_parallel(smi_file, prop_arr, sample_line_numbers, line_positions,
+                                   sample_interval, actives, db_props, config, batch_size)
+
+
+def _process_bundle_standard_parallel(smi_file: str, prop_arr: np.ndarray, total_lines: int,
+                                    database_fraction: float, actives: Dict[str, Molecule],
+                                    db_props, config: dict, batch_size: int, verbose: bool,
+                                    bundle_index: int) -> Dict[str, Molecule]:
+    """Parallel version of standard processing method."""
+    np.random.seed(hash(smi_file) % (2**32))
+    
+    with open(smi_file, 'r') as f:
+        df_batch = []
+        selected_indices = []
+        total_processed = 0
+        
+        if database_fraction >= 1.0:
+            # Fast path: use all lines
+            for line_count, line in enumerate(f):
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    df_batch.append(parts[:2])
+                    selected_indices.append(total_processed)
+                elif len(parts) == 1:
+                    df_batch.append([parts[0], f"mol_{line_count}"])
+                    selected_indices.append(total_processed)
+                else:
+                    total_processed += 1
+                    continue
+                
+                total_processed += 1
+                
+                if len(df_batch) >= batch_size:
+                    if df_batch:
+                        actives = _process_batch_parallel(df_batch, prop_arr, selected_indices,
+                                                        actives, db_props, config)
+                    df_batch = []
+                    selected_indices = []
+        else:
+            # Chunked sampling for larger fractions
+            chunk_size = 50000
+            sampling_chunk = np.random.random(chunk_size) <= database_fraction
+            chunk_idx = 0
+            
+            for line_count, line in enumerate(f):
+                if chunk_idx >= chunk_size:
+                    sampling_chunk = np.random.random(chunk_size) <= database_fraction
+                    chunk_idx = 0
+                
+                if not sampling_chunk[chunk_idx]:
+                    chunk_idx += 1
+                    total_processed += 1
+                    continue
+                
+                chunk_idx += 1
+                
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    df_batch.append(parts[:2])
+                    selected_indices.append(total_processed)
+                elif len(parts) == 1:
+                    df_batch.append([parts[0], f"mol_{line_count}"])
+                    selected_indices.append(total_processed)
+                else:
+                    total_processed += 1
+                    continue
+                
+                total_processed += 1
+                
+                if len(df_batch) >= batch_size:
+                    if df_batch:
+                        actives = _process_batch_parallel(df_batch, prop_arr, selected_indices,
+                                                        actives, db_props, config)
+                    df_batch = []
+                    selected_indices = []
+        
+        # Process remaining batch
+        if df_batch:
+            actives = _process_batch_parallel(df_batch, prop_arr, selected_indices,
+                                            actives, db_props, config)
+    
+    return actives
+
+
+def _process_samples_parallel(smi_file: str, prop_arr: np.ndarray, sample_line_numbers: List[int],
+                            line_positions: List[int], sample_interval: int, 
+                            actives: Dict[str, Molecule], db_props, config: dict,
+                            batch_size: int) -> Dict[str, Molecule]:
+    """Process sampled lines in parallel."""
+    df_batch = []
+    selected_indices = []
+    
+    with open(smi_file, 'r') as f:
+        for sample_line_num in sample_line_numbers:
+            # Calculate approximate byte position
+            if sample_line_num < len(line_positions) * sample_interval:
+                pos_index = sample_line_num // sample_interval
+                if pos_index < len(line_positions):
+                    f.seek(line_positions[pos_index])
+                    
+                    # Read forward to exact line
+                    lines_to_skip = sample_line_num % sample_interval
+                    for _ in range(lines_to_skip):
+                        line = f.readline()
+                        if not line:
+                            break
+                    
+                    # Read target line
+                    target_line = f.readline()
+                    if target_line:
+                        parts = target_line.strip().split()
+                        if len(parts) >= 2:
+                            df_batch.append(parts[:2])
+                            selected_indices.append(min(sample_line_num, len(prop_arr)-1))
+                        elif len(parts) == 1:
+                            df_batch.append([parts[0], f"mol_{sample_line_num}"])
+                            selected_indices.append(min(sample_line_num, len(prop_arr)-1))
+            
+            # Process batch when full
+            if len(df_batch) >= batch_size:
+                if df_batch:
+                    actives = _process_batch_parallel(df_batch, prop_arr, selected_indices,
+                                                    actives, db_props, config)
+                df_batch = []
+                selected_indices = []
+    
+    # Process remaining batch
+    if df_batch:
+        actives = _process_batch_parallel(df_batch, prop_arr, selected_indices,
+                                        actives, db_props, config)
+    
+    return actives
+
+
+def _process_batch_parallel(df_batch: list, prop_arr: np.ndarray, selected_indices: list,
+                          actives: Dict[str, Molecule], db_props, config: dict) -> Dict[str, Molecule]:
+    """Process a batch of molecules in parallel context (no multiprocessing here)."""
+    if not df_batch or not selected_indices:
+        return actives
+    
+    # Create DataFrame from batch
+    df_batch_df = pd.DataFrame(df_batch, columns=["smi", "name"])
+    
+    # Get corresponding property slice
+    arr_batch = prop_arr[selected_indices, :][:, db_props.column_mask]
+    
+    # Process each target molecule sequentially (we're already in parallel context)
+    for name, molecule in actives.items():
+        # Calculate similarity scores
+        scores = (
+            (np.absolute(arr_batch - molecule.properties) / db_props.queried_enamine_std)
+            .sum(axis=1)
+        )
+        
+        # Filter by threshold
+        threshold_mask = scores < molecule.threshold
+        
+        if not threshold_mask.any():
+            continue
+        
+        # Create filtered copy
+        df_copy = df_batch_df[threshold_mask].copy()
+        df_copy['score'] = scores[threshold_mask]
+        
+        # Add molecular properties
+        filtered_arr = arr_batch[threshold_mask]
+        active_property_names = db_props.get_active_property_names()
+        
+        for i, prop_name in enumerate(active_property_names):
+            df_copy[prop_name] = filtered_arr[:, i]
+        
+        # Filter by charge if enabled
+        if config.get('Charge', False):
+            if config.get('Protonate', False):
+                df_copy = df_copy[
+                    df_copy.smi.apply(lambda x: predict_charge(x) == molecule.charge)
+                ]
+            else:
+                df_copy = df_copy[
+                    df_copy.smi.apply(lambda x: get_charge(x) == molecule.charge)
+                ]
+        
+        # Combine with existing decoys
+        if molecule.decoys.empty:
+            combined_df = df_copy
+        else:
+            existing_decoys = molecule.decoys.copy()
+            for prop_name in active_property_names:
+                if prop_name not in existing_decoys.columns:
+                    existing_decoys[prop_name] = existing_decoys['smi'].apply(
+                        lambda smi: db_props.calculate_queried_properties(smi)[
+                            active_property_names.index(prop_name)
+                        ]
+                    )
+            combined_df = pd.concat([existing_decoys, df_copy], ignore_index=True)
+        
+        # Sample if too many decoys
+        n_oversampled_decoys = config['Max_decoys_per_ligand'] * 10  # Hardcoded oversample
+        if combined_df.shape[0] > n_oversampled_decoys:
+            combined_df = combined_df.nsmallest(n_oversampled_decoys, 'score')
+            molecule.threshold = combined_df.score.max()
+        
+        # Update molecule
+        molecule.decoys = combined_df
+    
+    return actives
 
 
 def process_molecule_batch(args: Tuple) -> Tuple[str, Molecule]:
@@ -662,7 +973,126 @@ class DecoysGenerator:
     
     def generate_decoys(self) -> Dict[str, Molecule]:
         """
-        Generate decoys by processing all available bundles.
+        Generate decoys by processing all available bundles in parallel.
+        
+        Returns:
+            Dict[str, Molecule]: Updated dictionary of molecules with decoys
+        """
+        # Find all available bundles
+        available_bundles = []
+        bundle_index = 0
+        
+        while True:
+            if not self.db_props.validate_bundle_files(bundle_index):
+                break
+            available_bundles.append(bundle_index)
+            bundle_index += 1
+        
+        if not available_bundles:
+            print("No bundles found!")
+            return self.actives
+        
+        print(f"Found {len(available_bundles)} bundles to process")
+        
+        if len(available_bundles) == 1 or self.n_proc == 1:
+            # Fall back to sequential processing for single bundle or single process
+            return self._generate_decoys_sequential()
+        
+        # Parallel bundle processing
+        if self.verbose:
+            print(f"Processing {len(available_bundles)} bundles in parallel with {min(self.n_proc, len(available_bundles))} processes")
+            total_start_time = time.time()
+        else:
+            print(f"Processing {len(available_bundles)} bundles in parallel")
+        
+        # Prepare arguments for parallel processing
+        # Use fewer processes than available to leave some for internal parallelization if needed
+        num_bundle_processes = min(self.n_proc, len(available_bundles))
+        
+        # Create copies of actives for each process (deep copy needed)
+        import copy
+        args_list = []
+        for bundle_idx in available_bundles:
+            actives_copy = copy.deepcopy(self.actives)
+            args_list.append((
+                bundle_idx, 
+                self.db_props, 
+                actives_copy, 
+                self.config, 
+                self.batch_size, 
+                self.verbose
+            ))
+        
+        # Process bundles in parallel
+        completed_bundles = []
+        try:
+            with Pool(num_bundle_processes) as pool:
+                if self.verbose:
+                    print(f"  Starting parallel processing of {len(available_bundles)} bundles...")
+                
+                # Use map to process all bundles
+                results = pool.map(process_single_bundle, args_list)
+                
+                # Collect results
+                for bundle_idx, bundle_actives in results:
+                    completed_bundles.append(bundle_idx)
+                    
+                    # Merge results back into main actives
+                    for name, molecule in bundle_actives.items():
+                        if name in self.actives:
+                            # Combine decoys from this bundle with existing ones
+                            if not molecule.decoys.empty:
+                                if self.actives[name].decoys.empty:
+                                    self.actives[name].decoys = molecule.decoys.copy()
+                                else:
+                                    # Concatenate and sort by score
+                                    combined = pd.concat([
+                                        self.actives[name].decoys, 
+                                        molecule.decoys
+                                    ], ignore_index=True)
+                                    
+                                    # Keep best decoys
+                                    max_decoys = self.n_oversampled_decoys
+                                    if len(combined) > max_decoys:
+                                        combined = combined.nsmallest(max_decoys, 'score')
+                                    
+                                    self.actives[name].decoys = combined
+                                    # Update threshold
+                                    if not combined.empty:
+                                        self.actives[name].threshold = combined.score.max()
+        
+        except Exception as e:
+            print(f"Error in parallel processing: {e}")
+            if self.verbose:
+                import traceback
+                traceback.print_exc()
+            # Fall back to sequential processing
+            print("Falling back to sequential processing...")
+            return self._generate_decoys_sequential()
+        
+        # Apply similarity filtering after all bundles if enabled
+        if self.apply_similarity_filter:
+            if self.verbose:
+                filter_start = time.time()
+                print(f"Applying final similarity filtering (cutoff: {self.config['Max_tc']})...")
+            
+            self._apply_similarity_filtering()
+            
+            if self.verbose:
+                filter_time = time.time() - filter_start
+                print(f"Similarity filtering completed ({filter_time:.2f}s)")
+        
+        if self.verbose:
+            total_time = time.time() - total_start_time
+            print(f"Parallel processing completed: {len(completed_bundles)} bundles ({total_time:.2f}s)")
+        else:
+            print(f"Parallel processing completed: {len(completed_bundles)} bundles")
+        
+        return self.actives
+    
+    def _generate_decoys_sequential(self) -> Dict[str, Molecule]:
+        """
+        Generate decoys by processing bundles sequentially (fallback method).
         
         Returns:
             Dict[str, Molecule]: Updated dictionary of molecules with decoys
