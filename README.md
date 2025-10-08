@@ -18,58 +18,88 @@ This package provides a complete pipeline for generating molecular decoys for dr
 
 ## Installation
 
-### Option 1: Install from PyPI (Coming Soon)
+### Option 1: Install from GitHub
 ```bash
-pip install decoy-generation
+# Clone and install in one step
+pip install git+https://github.com/lmoesgaard/decoy_generation.git
+
+# Or clone first, then install
+git clone https://github.com/lmoesgaard/decoy_generation.git
+cd decoy_generation
+pip install .
 ```
 
-### Option 2: Install from Source
+### Option 2: Development Installation
 ```bash
 # Clone the repository
 git clone https://github.com/lmoesgaard/decoy_generation.git
 cd decoy_generation
 
-# Install in development mode (recommended)
+# Install in development mode (recommended for contributors)
 pip install -e .
 
-# Or install normally
-pip install .
+# Or install with optional dependencies
+pip install -e .[openbabel,dev]
 ```
 
-### Option 3: Install Dependencies Only
+### Option 3: Manual Dependency Installation
 ```bash
-# Install dependencies from requirements.txt
+# If you prefer to install dependencies separately
 pip install -r requirements.txt
+python main.py --help  # Use directly without pip install
 ```
 
 ### Dependencies
 
-The package automatically installs the following dependencies:
-- **rdkit>=2023.3.1**: Molecular informatics toolkit
-- **pandas>=1.5.0**: Data manipulation and analysis
-- **numpy>=1.21.0**: Numerical computing
-- **matplotlib>=3.5.0**: Plotting and visualization
-- **openbabel>=3.1.0**: Chemical file format conversion
-- **scipy>=1.9.0**: Scientific computing
+**Core dependencies** (automatically installed):
+- **rdkit**: Molecular informatics toolkit
+- **pandas**: Data manipulation and analysis  
+- **numpy**: Numerical computing
+- **matplotlib**: Plotting and visualization
+- **scipy**: Scientific computing
+
+**Optional dependencies**:
+- **openbabel-wheel**: Enhanced charge detection with pH-dependent protonation
+  ```bash
+  pip install openbabel-wheel
+  # or install with: pip install .[openbabel]
+  ```
+
+### Verify Installation
+
+```bash
+# Test the installation
+python -c "from main import main; print('Installation successful!')"
+
+# Test with help
+python main.py --help
+```
 
 ## Usage
 
 After installation, you can use the package in several ways:
 
-### Command Line Interface (Installed Package)
+### Option 1: Direct Script Execution (Recommended)
 
 ```bash
 # Generate decoys
-decoy-generation --ligands ligands.smi --config config.json --output-dir results
+python main.py --ligands ligands.smi --config examples/default_config.json --output-dir results
 
 # Sample properties 
-sample-props --bundle-dir /path/to/bundles --output sampled_std.npy
+python sample_props.py --bundle-dir /path/to/bundles --output sampled_std.npy
 
 # Get help
-decoy-generation --help
+python main.py --help
 ```
 
-### Direct Script Execution
+### Option 2: Python Import
+
+```bash
+# From the package directory
+python -c "from main import main; main()" --ligands ligands.smi --config config.json
+```
+
+### Example Command
 
 The main script provides a comprehensive command-line interface:
 
