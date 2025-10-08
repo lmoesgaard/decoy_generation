@@ -883,6 +883,11 @@ class DecoysGenerator:
         if self.verbose:
             print(f"  Successfully sampled {len(sample_line_numbers):,} lines using seeking")
             print(f"  Total valid molecules processed: {lines_processed}")
+            
+            # Debug: Show current decoy counts after seeking
+            decoy_counts = {name: mol.num_decoys for name, mol in self.actives.items()}
+            total_decoys = sum(decoy_counts.values())
+            print(f"  Debug - Current decoys after seeking: {total_decoys} total ({decoy_counts})")
         else:
             print(f"  Seeking completed: {lines_processed} molecules processed")
     
@@ -973,12 +978,15 @@ class DecoysGenerator:
     
     def generate_decoys(self) -> Dict[str, Molecule]:
         """
-        Generate decoys by processing all available bundles in parallel.
+        Generate decoys by processing all available bundles.
+        
+        For now, we'll use sequential processing with optimizations.
+        Parallel bundle processing had issues with object copying and result merging.
         
         Returns:
             Dict[str, Molecule]: Updated dictionary of molecules with decoys
         """
-        # Find all available bundles
+        # Find all available bundles first to show progress
         available_bundles = []
         bundle_index = 0
         
@@ -994,121 +1002,33 @@ class DecoysGenerator:
         
         print(f"Found {len(available_bundles)} bundles to process")
         
-        if len(available_bundles) == 1 or self.n_proc == 1:
-            # Fall back to sequential processing for single bundle or single process
-            return self._generate_decoys_sequential()
-        
-        # Parallel bundle processing
-        if self.verbose:
-            print(f"Processing {len(available_bundles)} bundles in parallel with {min(self.n_proc, len(available_bundles))} processes")
-            total_start_time = time.time()
-        else:
-            print(f"Processing {len(available_bundles)} bundles in parallel")
-        
-        # Prepare arguments for parallel processing
-        # Use fewer processes than available to leave some for internal parallelization if needed
-        num_bundle_processes = min(self.n_proc, len(available_bundles))
-        
-        # Create copies of actives for each process (deep copy needed)
-        import copy
-        args_list = []
-        for bundle_idx in available_bundles:
-            actives_copy = copy.deepcopy(self.actives)
-            args_list.append((
-                bundle_idx, 
-                self.db_props, 
-                actives_copy, 
-                self.config, 
-                self.batch_size, 
-                self.verbose
-            ))
-        
-        # Process bundles in parallel
-        completed_bundles = []
-        try:
-            with Pool(num_bundle_processes) as pool:
-                if self.verbose:
-                    print(f"  Starting parallel processing of {len(available_bundles)} bundles...")
-                
-                # Use map to process all bundles
-                results = pool.map(process_single_bundle, args_list)
-                
-                # Collect results
-                for bundle_idx, bundle_actives in results:
-                    completed_bundles.append(bundle_idx)
-                    
-                    # Merge results back into main actives
-                    for name, molecule in bundle_actives.items():
-                        if name in self.actives:
-                            # Combine decoys from this bundle with existing ones
-                            if not molecule.decoys.empty:
-                                if self.actives[name].decoys.empty:
-                                    self.actives[name].decoys = molecule.decoys.copy()
-                                else:
-                                    # Concatenate and sort by score
-                                    combined = pd.concat([
-                                        self.actives[name].decoys, 
-                                        molecule.decoys
-                                    ], ignore_index=True)
-                                    
-                                    # Keep best decoys
-                                    max_decoys = self.n_oversampled_decoys
-                                    if len(combined) > max_decoys:
-                                        combined = combined.nsmallest(max_decoys, 'score')
-                                    
-                                    self.actives[name].decoys = combined
-                                    # Update threshold
-                                    if not combined.empty:
-                                        self.actives[name].threshold = combined.score.max()
-        
-        except Exception as e:
-            print(f"Error in parallel processing: {e}")
-            if self.verbose:
-                import traceback
-                traceback.print_exc()
-            # Fall back to sequential processing
-            print("Falling back to sequential processing...")
-            return self._generate_decoys_sequential()
-        
-        # Apply similarity filtering after all bundles if enabled
-        if self.apply_similarity_filter:
-            if self.verbose:
-                filter_start = time.time()
-                print(f"Applying final similarity filtering (cutoff: {self.config['Max_tc']})...")
-            
-            self._apply_similarity_filtering()
-            
-            if self.verbose:
-                filter_time = time.time() - filter_start
-                print(f"Similarity filtering completed ({filter_time:.2f}s)")
-        
-        if self.verbose:
-            total_time = time.time() - total_start_time
-            print(f"Parallel processing completed: {len(completed_bundles)} bundles ({total_time:.2f}s)")
-        else:
-            print(f"Parallel processing completed: {len(completed_bundles)} bundles")
-        
-        return self.actives
+        # Use sequential processing for reliability
+        return self._generate_decoys_sequential(available_bundles)
     
-    def _generate_decoys_sequential(self) -> Dict[str, Molecule]:
+    def _generate_decoys_sequential(self, available_bundles: List[int] = None) -> Dict[str, Molecule]:
         """
-        Generate decoys by processing bundles sequentially (fallback method).
+        Generate decoys by processing bundles sequentially with optimizations.
+        
+        Args:
+            available_bundles: List of bundle indices to process (optional)
         
         Returns:
             Dict[str, Molecule]: Updated dictionary of molecules with decoys
         """
-        bundle_index = 0
+        if available_bundles is None:
+            # Find bundles if not provided
+            available_bundles = []
+            bundle_index = 0
+            while True:
+                if not self.db_props.validate_bundle_files(bundle_index):
+                    break
+                available_bundles.append(bundle_index)
+                bundle_index += 1
+        
         processed_bundles = 0
         total_start_time = time.time() if self.verbose else None
         
-        while True:
-            if not self.db_props.validate_bundle_files(bundle_index):
-                if self.verbose:
-                    print(f"Bundle {bundle_index} not found, stopping.")
-                else:
-                    print(f"Bundle {bundle_index} not found, stopping.")
-                break
-            
+        for bundle_index in available_bundles:
             if self.verbose:
                 print(f"Processing bundle {bundle_index}...")
                 bundle_start = time.time()
@@ -1135,18 +1055,24 @@ class DecoysGenerator:
                 if self.verbose:
                     bundle_time = time.time() - bundle_start
                     elapsed_total = time.time() - total_start_time
-                    avg_time_per_bundle = elapsed_total / (processed_bundles)
+                    avg_time_per_bundle = elapsed_total / processed_bundles
+                    
+                    # Show current decoy counts
+                    decoy_counts = {name: mol.num_decoys for name, mol in self.actives.items()}
+                    total_decoys = sum(decoy_counts.values())
                     
                     print(f"Completed bundle {bundle_index} ({bundle_time:.2f}s, "
                           f"avg: {avg_time_per_bundle:.2f}s/bundle)")
+                    print(f"  Current decoys: {total_decoys} total ({decoy_counts})")
                 else:
                     print(f"Completed bundle {bundle_index}")
                     
             except Exception as e:
                 print(f"Error processing bundle {bundle_index}: {e}")
-                break
-            
-            bundle_index += 1
+                if self.verbose:
+                    import traceback
+                    traceback.print_exc()
+                continue  # Continue with next bundle instead of breaking
         
         if self.verbose and total_start_time:
             total_time = time.time() - total_start_time
