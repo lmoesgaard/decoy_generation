@@ -21,6 +21,36 @@ from rdkit.Chem import rdMolDescriptors, Descriptors, Crippen, Lipinski
 from openbabel import openbabel as ob
 
 
+def get_charge(mol: ob.OBMol) -> List[int]:
+    has_positive = 0
+    has_negative = 0
+
+    for atom in ob.OBMolAtomIter(mol):
+        formal_charge = atom.GetFormalCharge()
+        atomic_num = atom.GetAtomicNum()
+
+        # Skip nitro group charges (N+ with O- neighbors)
+        if formal_charge > 0 and atomic_num == 7:
+            is_nitro = any(
+                n.GetAtomicNum() == 8 and n.GetFormalCharge() < 0
+                for n in ob.OBAtomAtomIter(atom)
+            )
+            if not is_nitro:
+                has_positive = 1
+        elif formal_charge > 0:
+            has_positive = 1
+        elif formal_charge < 0 and atomic_num == 8:
+            is_nitro = any(
+                n.GetAtomicNum() == 7 and n.GetFormalCharge() > 0
+                for n in ob.OBAtomAtomIter(atom)
+            )
+            if not is_nitro:
+                has_negative = 1
+        elif formal_charge < 0:
+            has_negative = 1
+
+    return [has_positive, has_negative]
+
 class TargetMolecule:
     """Simple container for target molecule and its properties."""
     
@@ -57,19 +87,8 @@ class TargetMolecule:
             if not conv.ReadString(mol, self.smiles):
                 return [0, 0]
             
-            # Count formal charges
-            positive = 0
-            negative = 0
-            
-            for atom in ob.OBMolAtomIter(mol):
-                formal_charge = atom.GetFormalCharge()
-                if formal_charge > 0:
-                    positive += formal_charge
-                elif formal_charge < 0:
-                    negative += abs(formal_charge)
-            
-            return [positive, negative]
-            
+            return get_charge(mol)
+
         except Exception:
             return [0, 0]
 
@@ -110,19 +129,9 @@ def calculate_charge_openbabel(smiles: str) -> List[int]:
         mol = ob.OBMol()
         if not conv.ReadString(mol, smiles):
             return [0, 0]
-        
-        positive = 0
-        negative = 0
-        
-        for atom in ob.OBMolAtomIter(mol):
-            formal_charge = atom.GetFormalCharge()
-            if formal_charge > 0:
-                positive += formal_charge
-            elif formal_charge < 0:
-                negative += abs(formal_charge)
-        
-        return [positive, negative]
-        
+
+        return get_charge(mol)
+
     except Exception:
         return [0, 0]
 
