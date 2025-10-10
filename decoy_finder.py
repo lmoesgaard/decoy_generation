@@ -143,6 +143,8 @@ def calculate_charge_openbabel(smiles: str) -> List[int]:
         mol = ob.OBMol()
         if not conv.ReadString(mol, smiles):
             return [0, 0]
+        
+        mol.CorrectForPH(7.4)
 
         return get_charge(mol)
 
