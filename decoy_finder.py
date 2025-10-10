@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Simple Decoy Finder - Clean Implementation
+Simple Decoy Finder - Clean Implementation with Sampling
 
 Find property-matched molecular decoys from large enumerated libraries.
 Processes 2B+ molecule SMILES bundles with precomputed properties using
-multiprocessing and adaptive thresholding.
+multiprocessing, adaptive thresholding, and distributed sampling.
 """
 
 import os
@@ -50,6 +50,19 @@ def get_charge(mol: ob.OBMol) -> List[int]:
             has_negative = 1
 
     return [has_positive, has_negative]
+
+
+def generate_sampling_mask(bundle_size: int, sample_fraction: float, bundle_id: int) -> np.ndarray:
+    """Generate a distributed boolean sampling mask for a bundle."""
+    if sample_fraction >= 1.0:
+        return np.ones(bundle_size, dtype=bool)
+    
+    # Use bundle_id as seed for reproducible sampling
+    np.random.seed(bundle_id * 42 + 123)
+    
+    # Generate random mask distributed across the bundle
+    return np.random.random(bundle_size) < sample_fraction
+
 
 class TargetMolecule:
     """Simple container for target molecule and its properties."""
@@ -176,17 +189,17 @@ def calculate_similarity_score(target_props: np.ndarray, candidate_props: np.nda
 
 def process_bundle_worker(args: Tuple) -> str:
     """
-    Worker function to process a single bundle for all targets.
+    Worker function to process a single bundle for all targets with sampling.
     
     Args:
         args: (bundle_id, smi_prefix, prop_prefix, smi_dir, prop_dir, 
-               targets, config, stds, output_dir, batch_size)
+               targets, config, stds, output_dir, batch_size, sample_fraction)
     
     Returns:
         str: Status message
     """
     (bundle_id, smi_prefix, prop_prefix, smi_dir, prop_dir, 
-     targets, config, stds, output_dir, batch_size) = args
+     targets, config, stds, output_dir, batch_size, sample_fraction) = args
     
     # File paths
     smi_file = Path(smi_dir) / f"{smi_prefix}{bundle_id}.smi"
@@ -200,6 +213,11 @@ def process_bundle_worker(args: Tuple) -> str:
         prop_array = np.load(prop_file, mmap_mode='r')
     except Exception as e:
         return f"Bundle {bundle_id}: Error loading properties - {e}"
+    
+    # Generate sampling mask
+    total_molecules = prop_array.shape[0]
+    sampling_mask = generate_sampling_mask(total_molecules, sample_fraction, bundle_id)
+    actual_samples = np.sum(sampling_mask)
     
     # Create active property mask
     property_names = ["NumHeavyAtoms", "MWt", "logP", "NumHAcceptors", 
@@ -220,14 +238,19 @@ def process_bundle_worker(args: Tuple) -> str:
     
     molecules_processed = 0
     
-    # Process SMILES file in batches
+    # Process SMILES file in batches with sampling
     with open(smi_file, 'r') as f:
         batch_smiles = []
         batch_names = []
+        batch_indices = []
         
         for line_idx, line in enumerate(f):
             line = line.strip()
             if not line:
+                continue
+            
+            # Check if this line should be sampled
+            if line_idx < len(sampling_mask) and not sampling_mask[line_idx]:
                 continue
             
             parts = line.split()
@@ -235,21 +258,23 @@ def process_bundle_worker(args: Tuple) -> str:
                 smiles, name = parts[0], parts[1]
                 batch_smiles.append(smiles)
                 batch_names.append(name)
+                batch_indices.append(line_idx)
             
             # Process batch when full
             if len(batch_smiles) >= batch_size:
-                molecules_processed += _process_batch(
-                    batch_smiles, batch_names, line_idx - len(batch_smiles),
+                molecules_processed += _process_sampled_batch(
+                    batch_smiles, batch_names, batch_indices,
                     prop_array, targets, target_results, active_mask, 
                     stds, use_charges, config
                 )
                 batch_smiles = []
                 batch_names = []
+                batch_indices = []
         
         # Process remaining molecules
         if batch_smiles:
-            molecules_processed += _process_batch(
-                batch_smiles, batch_names, line_idx - len(batch_smiles),
+            molecules_processed += _process_sampled_batch(
+                batch_smiles, batch_names, batch_indices,
                 prop_array, targets, target_results, active_mask, 
                 stds, use_charges, config
             )
@@ -263,19 +288,17 @@ def process_bundle_worker(args: Tuple) -> str:
             _write_decoys_csv(result['best_decoys'], csv_file, property_names, active_mask)
             total_decoys_written += len(result['best_decoys'])
     
-    return f"Bundle {bundle_id}: Processed {molecules_processed} molecules, wrote {total_decoys_written} decoys"
+    return f"Bundle {bundle_id}: Sampled {actual_samples}/{total_molecules} molecules ({sample_fraction:.1%}), processed {molecules_processed}, wrote {total_decoys_written} decoys"
 
 
-def _process_batch(batch_smiles: List[str], batch_names: List[str], start_idx: int,
-                  prop_array: np.ndarray, targets: List[TargetMolecule], 
-                  target_results: Dict, active_mask: np.ndarray, stds: np.ndarray,
-                  use_charges: bool, config: Dict) -> int:
-    """Process a batch of molecules against all targets."""
+def _process_sampled_batch(batch_smiles: List[str], batch_names: List[str], batch_indices: List[int],
+                          prop_array: np.ndarray, targets: List[TargetMolecule], 
+                          target_results: Dict, active_mask: np.ndarray, stds: np.ndarray,
+                          use_charges: bool, config: Dict) -> int:
+    """Process a batch of sampled molecules against all targets."""
     processed = 0
     
-    for i, (smiles, name) in enumerate(zip(batch_smiles, batch_names)):
-        mol_idx = start_idx + i
-        
+    for i, (smiles, name, mol_idx) in enumerate(zip(batch_smiles, batch_names, batch_indices)):
         # Skip if index out of bounds
         if mol_idx >= prop_array.shape[0]:
             continue
@@ -373,8 +396,15 @@ def main():
     parser.add_argument("--output-dir", default="decoy_results", help="Output directory")
     parser.add_argument("--batch-size", type=int, default=1000, help="Batch size for processing")
     parser.add_argument("--n-proc", type=int, default=mp.cpu_count(), help="Number of processes")
+    parser.add_argument("--sample-fraction", type=float, default=1.0, 
+                       help="Fraction of each bundle to sample (0.0-1.0, default: 1.0 = full bundle)")
     
     args = parser.parse_args()
+    
+    # Validate sample fraction
+    if not 0.0 < args.sample_fraction <= 1.0:
+        print("Error: sample-fraction must be between 0.0 and 1.0")
+        return 1
     
     # Load configuration
     with open(args.config, 'r') as f:
@@ -411,6 +441,7 @@ def main():
     
     print(f"Found {len(available_bundles)} bundles to process")
     print(f"Processing with {args.n_proc} processes")
+    print(f"Sample fraction: {args.sample_fraction:.1%}")
     
     # Prepare arguments for multiprocessing
     worker_args = []
@@ -418,7 +449,7 @@ def main():
         worker_args.append((
             bundle_id, args.smi_prefix, args.prop_prefix, 
             args.smi_dir, args.prop_dir, targets, config, stds,
-            args.output_dir, args.batch_size
+            args.output_dir, args.batch_size, args.sample_fraction
         ))
     
     # Process bundles in parallel
