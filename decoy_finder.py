@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Simple Decoy Finder - Clean Implementation with Sampling
+Simple Decoy Finder - Clean Implementation with Memory-Efficient Sampling
 
 Find property-matched molecular decoys from large enumerated libraries.
 Processes 2B+ molecule SMILES bundles with precomputed properties using
-multiprocessing, adaptive thresholding, and distributed sampling.
+multiprocessing, adaptive thresholding, and memory-efficient distributed sampling.
 """
 
 import os
@@ -52,16 +52,17 @@ def get_charge(mol: ob.OBMol) -> List[int]:
     return [has_positive, has_negative]
 
 
-def generate_sampling_mask(bundle_size: int, sample_fraction: float, bundle_id: int) -> np.ndarray:
-    """Generate a distributed boolean sampling mask for a bundle."""
+def should_sample_molecule(line_idx: int, sample_fraction: float, bundle_id: int) -> bool:
+    """Memory-efficient per-molecule sampling decision."""
     if sample_fraction >= 1.0:
-        return np.ones(bundle_size, dtype=bool)
+        return True
     
-    # Use bundle_id as seed for reproducible sampling
-    np.random.seed(bundle_id * 42 + 123)
+    # Use deterministic hash-based sampling for reproducibility
+    # Combine bundle_id and line_idx for unique seed per molecule
+    seed = (bundle_id * 982451653 + line_idx * 2654435761) % (2**32)
+    np.random.seed(seed)
     
-    # Generate random mask distributed across the bundle
-    return np.random.random(bundle_size) < sample_fraction
+    return np.random.random() < sample_fraction
 
 
 class TargetMolecule:
@@ -189,7 +190,7 @@ def calculate_similarity_score(target_props: np.ndarray, candidate_props: np.nda
 
 def process_bundle_worker(args: Tuple) -> str:
     """
-    Worker function to process a single bundle for all targets with sampling.
+    Worker function to process a single bundle for all targets with memory-efficient sampling.
     
     Args:
         args: (bundle_id, smi_prefix, prop_prefix, smi_dir, prop_dir, 
@@ -214,10 +215,7 @@ def process_bundle_worker(args: Tuple) -> str:
     except Exception as e:
         return f"Bundle {bundle_id}: Error loading properties - {e}"
     
-    # Generate sampling mask
     total_molecules = prop_array.shape[0]
-    sampling_mask = generate_sampling_mask(total_molecules, sample_fraction, bundle_id)
-    actual_samples = np.sum(sampling_mask)
     
     # Create active property mask
     property_names = ["NumHeavyAtoms", "MWt", "logP", "NumHAcceptors", 
@@ -237,8 +235,9 @@ def process_bundle_worker(args: Tuple) -> str:
         }
     
     molecules_processed = 0
+    molecules_sampled = 0
     
-    # Process SMILES file in batches with sampling
+    # Process SMILES file in batches with memory-efficient sampling
     with open(smi_file, 'r') as f:
         batch_smiles = []
         batch_names = []
@@ -249,9 +248,11 @@ def process_bundle_worker(args: Tuple) -> str:
             if not line:
                 continue
             
-            # Check if this line should be sampled
-            if line_idx < len(sampling_mask) and not sampling_mask[line_idx]:
+            # Memory-efficient per-molecule sampling decision
+            if not should_sample_molecule(line_idx, sample_fraction, bundle_id):
                 continue
+            
+            molecules_sampled += 1
             
             parts = line.split()
             if len(parts) >= 2:
@@ -288,7 +289,7 @@ def process_bundle_worker(args: Tuple) -> str:
             _write_decoys_csv(result['best_decoys'], csv_file, property_names, active_mask)
             total_decoys_written += len(result['best_decoys'])
     
-    return f"Bundle {bundle_id}: Sampled {actual_samples}/{total_molecules} molecules ({sample_fraction:.1%}), processed {molecules_processed}, wrote {total_decoys_written} decoys"
+    return f"Bundle {bundle_id}: Sampled {molecules_sampled}/{total_molecules} molecules ({sample_fraction:.1%}), processed {molecules_processed}, wrote {total_decoys_written} decoys"
 
 
 def _process_sampled_batch(batch_smiles: List[str], batch_names: List[str], batch_indices: List[int],
@@ -441,7 +442,7 @@ def main():
     
     print(f"Found {len(available_bundles)} bundles to process")
     print(f"Processing with {args.n_proc} processes")
-    print(f"Sample fraction: {args.sample_fraction:.1%}")
+    print(f"Sample fraction: {args.sample_fraction:.1%} (memory-efficient streaming)")
     
     # Prepare arguments for multiprocessing
     worker_args = []
